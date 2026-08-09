@@ -16,14 +16,14 @@ const VIEWS_DIRECTORY = "/app/views/"
 const APPLICATION_DIRECTORY = "application"
 const TEMPLATE_EXTENSIONS = ["html.erb", "html.herb", "turbo_stream.erb", "turbo_stream.herb", "erb", "herb"]
 const PARTIAL_NAME = /^[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_-]+)*$/
-const PARTIAL_KEYWORDS = ["partial", "layout"]
+const PARTIAL_KEYWORDS = ["partial", "layout", "spacer_template"]
 const IDENTIFIER_CHARACTER = /[A-Za-z0-9_]/
 const QUOTE = /^["']/
 const SNIPPET_LINES = 6
 const OPEN_TAG_WIDTH = 80
 const PRINT_OPTIONS = { ignoreErrors: true }
 
-interface PartialReference {
+export interface PartialReference {
   name: string
   keyword: string
   quoted: boolean
@@ -136,26 +136,57 @@ export class DefinitionService {
     return links.map(link => Location.create(link.targetUri, link.targetRange))
   }
 
-  private isStatic(reference: PartialReference): boolean {
+  isStatic(reference: PartialReference): boolean {
     return reference.quoted && PARTIAL_NAME.test(reference.name)
   }
 
-  private referenceAt(document: TextDocument, position: Position): PartialReference | null {
+  partialReferences(document: TextDocument): PartialReference[] {
     const result = this.parserService.parseContent(document.getText(), { render_nodes: true })
     const collector = new RenderCollector()
 
     collector.visit(result.value as DocumentNode)
 
-    for (const render of collector.renders) {
-      const reference = this.referenceFor(document, render)
+    return collector.renders.flatMap(render => this.referencesFor(document, render))
+  }
 
-      if (!reference) continue
-      if (!isPositionInRange(position, reference.triggerRange)) continue
+  referenceAt(document: TextDocument, position: Position): PartialReference | null {
+    const matches = this.partialReferences(document).filter(reference => isPositionInRange(position, reference.triggerRange))
 
-      return reference
+    if (matches.length === 0) return null
+
+    return matches.reduce((narrowest, reference) => (
+      this.rangeSize(document, reference.triggerRange) < this.rangeSize(document, narrowest.triggerRange) ? reference : narrowest
+    ))
+  }
+
+  private rangeSize(document: TextDocument, range: Range): number {
+    return document.offsetAt(range.end) - document.offsetAt(range.start)
+  }
+
+  private referencesFor(document: TextDocument, render: ERBRenderNode): PartialReference[] {
+    const rendered = this.referenceFor(document, render)
+    const spacer = this.spacerReferenceFor(document, render)
+
+    return [rendered, spacer].filter(reference => reference !== null)
+  }
+
+  private spacerReferenceFor(document: TextDocument, render: ERBRenderNode): PartialReference | null {
+    const spacer = render.keywords?.spacer_template
+
+    if (!spacer) return null
+
+    const range = lspRangeFromLocation(spacer.location)
+
+    const reference = {
+      name: spacer.value,
+      keyword: "partial",
+      quoted: QUOTE.test(spacer.value) || QUOTE.test(document.getText(range)),
+      derived: false,
+      triggerRange: this.withKeyword(document, range),
+      originRange: this.withoutQuotes(document, range),
     }
 
-    return null
+    return this.isStatic(reference) ? reference : null
   }
 
   private referenceFor(document: TextDocument, render: ERBRenderNode): PartialReference | null {
